@@ -1,17 +1,26 @@
 // src/components/ImageCanvas.js
-import React, { useContext, useEffect, useRef } from 'react';
-import { useState } from 'react';
-import DrawingTools from './DrawingTools';  // 確保已創建此組件
+import React, { useContext, useEffect, useRef, useState } from 'react';
 import { DicomContext } from '../context/DicomContext';
 import * as dwv from 'dwv';
+import { drawLabels, drawInProgressPolygon } from '../utils/drawingUtils';
 
-// 創建樣式來確保 dwv 容器可以正確顯示
+// 創建樣式來確保 dwv 容器和繪圖層可以正確顯示
 const dwvStyle = {
   width: '100%',
   height: '100%',
   position: 'absolute',
   top: 0,
   left: 0
+};
+
+const canvasStyle = {
+  width: '100%',
+  height: '100%',
+  position: 'absolute',
+  top: 0,
+  left: 0,
+  zIndex: 10, // 確保在 DWV 上方
+  pointerEvents: 'none' // 默認不接收滑鼠事件，只在繪圖模式時啟用
 };
 
 // 安全初始化 DWV
@@ -26,98 +35,142 @@ const ImageCanvas = () => {
   const {
     dicomFile,
     dicomImage,
-    canvasRef,
-    drawingCanvasRef,
     isDrawing,
+    setIsDrawing,
+    labels,
+    setLabels,
     polygonPointsRef,
     addPointToPolygon,
     completePolygon
   } = useContext(DicomContext);
   
-  // 引用 DWV 應用程式
-  const dwvAppRef = useRef(null);
+  // 引用 DWV 容器和應用程式
   const dwvContainerRef = useRef(null);
-  const [dwvInitialized, setDwvInitialized] = useState(false);
+  const [dwvApp, setDwvApp] = useState(null);
+  const [currentImage, setCurrentImage] = useState(null);
+  
+  // 引用繪圖 Canvas
+  const drawingCanvasRef = useRef(null);
+  const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 });
   
   // 初始化 DWV
   useEffect(() => {
-    // 確保 DOM 元素存在
-    if (!dwvContainerRef.current) return;
-    
+    // 如果已經初始化，則不重複初始化
+    if (dwvApp !== null) {
+      return;
+    }
+
     try {
-      // 創建 DWV 應用程式
-      const app = new dwv.App();
+      // 確保 DOM 元素存在
+      if (!dwvContainerRef.current) {
+        console.error("DWV container not found");
+        return;
+      }
+
+      // 創建 DWV 實例
+      console.log("Initializing DWV for image display only...");
       
-      // 初始化應用程式
-      app.init({
-        "dataViewConfigs": {
-          "*": [{
-            "divId": "dwv-container"
-          }]
-        },
-        "tools": {
-          "WindowLevel": {},
-          "ZoomAndPan": {},
-          "Draw": {
-            "options": ["Rectangle", "Circle", "Polygon"]
+      // 創建最簡單的 DWV 配置（僅用於顯示）
+      const config = {
+        dataViewConfigs: { "*": [{ divId: "dwv-container" }] }
+      };
+
+      const app = new dwv.App();
+      app.init(config);
+      
+      // 保存應用引用
+      setDwvApp(app);
+      
+      // 添加載入完成事件
+      app.addEventListener('load', function() {
+        console.log('DWV: Image loaded successfully');
+        
+        // 獲取影像尺寸
+        try {
+          const image = app.getImage(0);
+          if (image) {
+            const viewSize = app.getLayerController().getActiveViewLayer().getViewController().getImageSize();
+            setCanvasSize({
+              width: viewSize.x || image.getGeometry().getSize().getNumberOfColumns(),
+              height: viewSize.y || image.getGeometry().getSize().getNumberOfRows()
+            });
+            console.log('Image size:', viewSize);
           }
+        } catch (e) {
+          console.error('Error getting image size:', e);
         }
       });
       
-      // 添加載入事件監聽器
-      app.addEventListener('load', function () {
-        console.log('DWV: Image loaded successfully');
-      });
-      
-      app.addEventListener('error', function (error) {
-        console.error('DWV error:', error);
-      });
-      
-      // 保存應用程式引用
-      dwvAppRef.current = app;
-      setDwvInitialized(true);
+      console.log("DWV initialized for viewing");
     } catch (error) {
-      console.error('Error initializing DWV:', error);
+      console.error("Failed to initialize DWV:", error);
     }
     
     // 清理函數
     return () => {
-      if (dwvAppRef.current) {
+      if (dwvApp) {
         try {
-          dwvAppRef.current.reset();
+          console.log("Resetting DWV app");
+          dwvApp.reset();
         } catch (e) {
-          console.error('Error resetting DWV app:', e);
+          console.error("Error resetting DWV app:", e);
         }
       }
     };
   }, []);
-  
-  // 當 dicomImage 變更時加載圖像
+
+  // 當 dicomImage 變更且 dwvApp 已初始化時加載圖像
   useEffect(() => {
-    const app = dwvAppRef.current;
-    if (app && dwvInitialized && dicomImage && dicomImage.dicomData) {
-      console.log('Loading DICOM data into DWV viewer');
-      
-      try {
-        // 重置應用程式
-        app.reset();
-        
-        // 使用 dwv 加載 DICOM 檔案
-        app.loadURLs([dicomImage.dicomData.blobUrl]);
-      } catch (error) {
-        console.error('Error loading DICOM into DWV:', error);
-      }
+    if (!dwvApp || !dicomImage || !dicomImage.dicomData || dicomImage === currentImage) {
+      return;
     }
-  }, [dicomImage, dwvInitialized]);
+    
+    console.log('Loading DICOM data into DWV viewer');
+    
+    try {
+      // 重置應用程式
+      dwvApp.reset();
+      
+      // 載入 DICOM 檔案
+      dwvApp.loadURLs([dicomImage.dicomData.blobUrl]);
+      
+      // 更新當前加載的圖像
+      setCurrentImage(dicomImage);
+    } catch (error) {
+      console.error('Error loading DICOM into DWV:', error);
+    }
+  }, [dicomImage, dwvApp, currentImage]);
   
-  // 自定義繪製多邊形的事件處理器
+  // 更新 Canvas 尺寸
+  useEffect(() => {
+    if (drawingCanvasRef.current && canvasSize.width > 0 && canvasSize.height > 0) {
+      const canvas = drawingCanvasRef.current;
+      canvas.width = canvasSize.width;
+      canvas.height = canvasSize.height;
+      
+      // 重繪所有標記
+      drawLabels(canvas, labels);
+    }
+  }, [canvasSize, labels]);
+  
+  // 標記模式開關
+  const toggleDrawing = () => {
+    setIsDrawing(!isDrawing);
+    
+    // 更新 Canvas 的滑鼠事件處理
+    if (drawingCanvasRef.current) {
+      drawingCanvasRef.current.style.pointerEvents = !isDrawing ? 'auto' : 'none';
+    }
+  };
+  
+  // 處理滑鼠事件來繪製標記
   const handleMouseDown = (e) => {
     if (!isDrawing) return;
     
-    // 獲取 Canvas 的位置
-    const rect = e.currentTarget.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
+    const canvas = drawingCanvasRef.current;
+    const rect = canvas.getBoundingClientRect();
+    const x = (e.clientX - rect.left) * (canvas.width / rect.width);
+    const y = (e.clientY - rect.top) * (canvas.height / rect.height);
     
     const points = polygonPointsRef.current;
     
@@ -131,12 +184,31 @@ const ImageCanvas = () => {
     ) {
       // 完成多邊形
       completePolygon();
+      
+      // 重繪所有標記
+      drawLabels(canvas, labels);
     } else {
       // 添加點到多邊形
       addPointToPolygon(x, y);
     }
+    
+    // 繪製進行中的多邊形
+    drawInProgressPolygon(canvas, polygonPointsRef.current);
   };
   
+  // 處理滑鼠移動
+  const handleMouseMove = (e) => {
+    if (!isDrawing || polygonPointsRef.current.length === 0) return;
+    
+    const canvas = drawingCanvasRef.current;
+    const rect = canvas.getBoundingClientRect();
+    const x = (e.clientX - rect.left) * (canvas.width / rect.width);
+    const y = (e.clientY - rect.top) * (canvas.height / rect.height);
+    
+    // 繪製進行中的多邊形
+    drawInProgressPolygon(canvas, polygonPointsRef.current, x, y);
+  };
+
   return (
     <div className="canvas-container">
       {/* DWV 容器 */}
@@ -146,30 +218,43 @@ const ImageCanvas = () => {
         style={dwvStyle}
       ></div>
       
-      {/* 繪圖層，用於自定義標記 */}
+      {/* 手動繪圖 Canvas */}
       <canvas 
         ref={drawingCanvasRef}
-        className="drawing-canvas"
+        style={{
+          ...canvasStyle,
+          pointerEvents: isDrawing ? 'auto' : 'none'
+        }}
         onMouseDown={handleMouseDown}
+        onMouseMove={handleMouseMove}
       />
       
-      {dwvInitialized && dwvAppRef.current && (
-        <DrawingTools dwvApp={dwvAppRef.current} />
-      )}
+      {/* 簡單的工具按鈕 */}
+      <div className="simple-tools" style={{
+        position: 'absolute',
+        bottom: '10px',
+        left: '10px',
+        zIndex: 1000,
+        background: 'rgba(255,255,255,0.7)',
+        padding: '5px',
+        borderRadius: '5px'
+      }}>
+        <button 
+          onClick={toggleDrawing} 
+          style={{
+            margin: '0 5px',
+            backgroundColor: isDrawing ? '#4CAF50' : '#f0f0f0'
+          }}
+        >
+          {isDrawing ? 'Cancel Drawing' : 'Start Drawing'}
+        </button>
+      </div>
       
       {!dicomFile && (
         <div className="placeholder">
           <div className="placeholder-content">
             <div className="placeholder-icon">×</div>
             <div>Dicom Image</div>
-          </div>
-        </div>
-      )}
-      
-      {dicomFile && !dicomImage && (
-        <div className="placeholder">
-          <div className="placeholder-content">
-            <div>Loading image...</div>
           </div>
         </div>
       )}
